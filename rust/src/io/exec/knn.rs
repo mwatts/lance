@@ -369,6 +369,7 @@ mod tests {
     use crate::arrow::*;
     use crate::dataset::{Dataset, WriteParams};
     use crate::index::vector::MetricType;
+    use crate::io::exec::testing::TestingExec;
     use crate::utils::testing::generate_random_array;
 
     #[tokio::test]
@@ -452,5 +453,52 @@ mod tests {
         .unwrap();
 
         assert_eq!(expected, results[0]);
+    }
+
+    #[test]
+    fn test_create_knn_flat() {
+        let dim: usize = 128;
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("key", DataType::Int32, false),
+            ArrowField::new(
+                "vector",
+                DataType::FixedSizeList(
+                    Box::new(ArrowField::new("item", DataType::Float32, true)),
+                    dim as i32,
+                ),
+                true,
+            ),
+            ArrowField::new("uri", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::new_empty(schema.clone());
+
+        let query = Query {
+            column: "vector".to_string(),
+            key: Arc::new(generate_random_array(dim)),
+            k: 10,
+            nprobes: 0,
+            refine_factor: None,
+            metric_type: MetricType::L2,
+            use_index: false,
+        };
+
+        let input: Arc<dyn ExecutionPlan> = Arc::new(TestingExec::new(vec![batch.into()]));
+        let idx = KNNFlatExec::try_new(input, query).unwrap();
+        assert_eq!(
+            idx.schema().as_ref(),
+            &ArrowSchema::new(vec![
+                ArrowField::new("key", DataType::Int32, false),
+                ArrowField::new(
+                    "vector",
+                    DataType::FixedSizeList(
+                        Box::new(ArrowField::new("item", DataType::Float32, true)),
+                        dim as i32,
+                    ),
+                    true,
+                ),
+                ArrowField::new("uri", DataType::Utf8, true),
+                ArrowField::new(SCORE_COL, DataType::Float32, false),
+            ])
+        );
     }
 }

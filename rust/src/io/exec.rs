@@ -16,6 +16,7 @@ mod knn;
 mod planner;
 mod scan;
 mod take;
+#[cfg(test)]
 mod testing;
 
 pub use knn::*;

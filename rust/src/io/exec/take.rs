@@ -165,14 +165,16 @@ impl GlobalTakeExec {
     }
 }
 
-fn projection_with_row_id(projection: &Schema, drop_row_id: bool) -> SchemaRef {
-    let schema = ArrowSchema::from(projection);
+fn projection_with_row_id(projection: &ArrowSchema, drop_row_id: bool) -> SchemaRef {
     if drop_row_id {
-        Arc::new(schema)
+        Arc::new(projection.clone())
     } else {
-        let mut fields = schema.fields;
+        let mut fields = projection.fields.to_vec();
         fields.push(Field::new(ROW_ID, DataType::UInt64, false));
-        Arc::new(ArrowSchema::new(fields))
+        Arc::new(ArrowSchema::new_with_metadata(
+            fields,
+            projection.metadata().clone(),
+        ))
     }
 }
 
@@ -182,7 +184,7 @@ impl ExecutionPlan for GlobalTakeExec {
     }
 
     fn schema(&self) -> SchemaRef {
-        projection_with_row_id(&self.schema, self.drop_row_id)
+        projection_with_row_id(&self.input.schema(), self.drop_row_id)
     }
 
     fn output_partitioning(&self) -> datafusion::physical_plan::Partitioning {
@@ -224,8 +226,7 @@ impl ExecutionPlan for GlobalTakeExec {
 }
 
 pub struct LocalTake {
-    /// The output schema.
-    schema: Arc<Schema>,
+    projection: Arc<Schema>,
 
     rx: Receiver<Result<RecordBatch>>,
     _bg_thread: JoinHandle<()>,
@@ -235,24 +236,19 @@ impl LocalTake {
     pub fn try_new(
         input: SendableRecordBatchStream,
         dataset: Arc<Dataset>,
-        schema: Arc<Schema>,
-        ann_schema: Option<Arc<Schema>>, // TODO add input/output schema contract to exec nodes and remove this
+        projection: Arc<Schema>,
         drop_row_id: bool,
     ) -> Result<Self> {
         let (tx, rx) = mpsc::channel(4);
         let inner_schema = Schema::try_from(input.schema().as_ref())?;
-        let mut take_schema = schema.exclude(&inner_schema)?;
-        if ann_schema.is_some() {
-            take_schema = take_schema.exclude(&ann_schema.unwrap())?;
-        }
-        let projection = schema.clone();
+        let take_schema = projection.exclude(&inner_schema)?;
 
         let _bg_thread = tokio::spawn(async move {
             if let Err(e) = input
                 .zip(stream::repeat_with(|| {
-                    (dataset.clone(), take_schema.clone(), projection.clone())
+                    (dataset.clone(), take_schema.clone())
                 }))
-                .then(|(b, (dataset, take_schema, projection))| async move {
+                .then(|(b, (dataset, take_schema))| async move {
                     // TODO: need to cache the fragments.
                     let batch = b?;
                     let projection_schema = ArrowSchema::from(projection.as_ref());
@@ -303,7 +299,7 @@ impl LocalTake {
             drop(tx)
         });
         Ok(Self {
-            schema,
+            projection,
             rx,
             _bg_thread,
         })
@@ -320,7 +316,7 @@ impl Stream for LocalTake {
 
 impl RecordBatchStream for LocalTake {
     fn schema(&self) -> SchemaRef {
-        Arc::new(self.schema.as_ref().into())
+        Arc::new(self.projection.as_ref().into())
     }
 }
 
@@ -335,8 +331,7 @@ impl RecordBatchStream for LocalTake {
 pub struct LocalTakeExec {
     dataset: Arc<Dataset>,
     input: Arc<dyn ExecutionPlan>,
-    schema: Arc<Schema>,
-    ann_schema: Option<Arc<Schema>>,
+    projection: Arc<Schema>,
     drop_row_id: bool,
 }
 
@@ -344,16 +339,14 @@ impl LocalTakeExec {
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         dataset: Arc<Dataset>,
-        schema: Arc<Schema>,
-        ann_schema: Option<Arc<Schema>>,
+        projection: Arc<Schema>,
         drop_row_id: bool,
     ) -> Self {
         assert!(input.schema().column_with_name(ROW_ID).is_some());
         Self {
             dataset,
             input,
-            schema,
-            ann_schema,
+            projection,
             drop_row_id,
         }
     }
@@ -365,7 +358,7 @@ impl ExecutionPlan for LocalTakeExec {
     }
 
     fn schema(&self) -> SchemaRef {
-        projection_with_row_id(&self.schema, self.drop_row_id)
+        projection_with_row_id(&self.input.schema(), self.drop_row_id)
     }
 
     fn output_partitioning(&self) -> datafusion::physical_plan::Partitioning {
@@ -392,8 +385,7 @@ impl ExecutionPlan for LocalTakeExec {
         Ok(Arc::new(Self {
             input: children[0].clone(),
             dataset: self.dataset.clone(),
-            schema: self.schema.clone(),
-            ann_schema: self.ann_schema.clone(),
+            projection: self.projection.clone(),
             drop_row_id: self.drop_row_id,
         }))
     }
@@ -407,8 +399,7 @@ impl ExecutionPlan for LocalTakeExec {
         Ok(Box::pin(LocalTake::try_new(
             input_stream,
             self.dataset.clone(),
-            self.schema.clone(),
-            self.ann_schema.clone(),
+            self.projection.clone(),
             self.drop_row_id,
         )?))
     }

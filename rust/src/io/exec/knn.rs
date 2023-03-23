@@ -31,8 +31,8 @@ use tokio::task::JoinHandle;
 use crate::dataset::scanner::RecordBatchStream;
 use crate::dataset::{Dataset, ROW_ID};
 use crate::index::vector::flat::flat_search;
-use crate::index::vector::{open_index, Query};
-use crate::{Result, Error};
+use crate::index::vector::{open_index, Query, SCORE_COL};
+use crate::{Error, Result};
 
 /// KNN node for post-filtering.
 pub struct KNNFlatStream {
@@ -92,7 +92,12 @@ impl DFRecordBatchStream for KNNFlatStream {
     }
 }
 
-/// Physical [ExecutionPlan] for Flat KNN node.
+/// [ExecutionPlan] for Flat KNN (bruteforce) search.
+///
+/// Preconditions:
+/// - `input` schema must contains `query.column`,
+/// - The column must be a vector.
+/// - `input` schema does not have "score" column.
 pub struct KNNFlatExec {
     /// Input node.
     input: Arc<dyn ExecutionPlan>,
@@ -114,9 +119,7 @@ impl std::fmt::Debug for KNNFlatExec {
 impl KNNFlatExec {
     /// Create a new [KNNFlatExec] node.
     ///
-    /// Preconditions:
-    /// - `input` schema must contains `query.column`,
-    /// - and the column must be a vector.
+    /// Returns an error if the preconditions are not met.
     pub fn try_new(input: Arc<dyn ExecutionPlan>, query: Query) -> Result<Self> {
         let schema = input.schema();
         let field = schema.field_with_name(&query.column).map_err(|_| {
@@ -130,6 +133,12 @@ impl KNNFlatExec {
                 "KNNFlatExec node: query column {} is not a vector",
                 query.column
             )));
+        };
+        if schema.field_with_name(SCORE_COL).is_ok() {
+            return Err(Error::IO(format!(
+                "KNNFlatExec node: input schema already has a column named {}",
+                SCORE_COL
+            )));
         }
 
         Ok(Self { input, query })
@@ -142,10 +151,14 @@ impl ExecutionPlan for KNNFlatExec {
     }
 
     fn schema(&self) -> arrow_schema::SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new("score", DataType::Float32, false),
-            Field::new(ROW_ID, DataType::UInt16, false),
-        ]))
+        let input_schema = self.input.schema();
+        let mut fields = input_schema.fields().to_vec();
+        fields.push(Field::new(SCORE_COL, DataType::Float32, false));
+
+        Arc::new(Schema::new_with_metadata(
+            fields,
+            input_schema.metadata().clone(),
+        ));
     }
 
     fn output_partitioning(&self) -> Partitioning {

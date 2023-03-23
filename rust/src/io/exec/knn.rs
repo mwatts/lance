@@ -32,6 +32,7 @@ use crate::dataset::scanner::RecordBatchStream;
 use crate::dataset::{Dataset, ROW_ID};
 use crate::index::vector::flat::flat_search;
 use crate::index::vector::{open_index, Query};
+use crate::{Result, Error};
 
 /// KNN node for post-filtering.
 pub struct KNNFlatStream {
@@ -93,7 +94,10 @@ impl DFRecordBatchStream for KNNFlatStream {
 
 /// Physical [ExecutionPlan] for Flat KNN node.
 pub struct KNNFlatExec {
+    /// Input node.
     input: Arc<dyn ExecutionPlan>,
+
+    /// The query to execute.
     query: Query,
 }
 
@@ -108,8 +112,20 @@ impl std::fmt::Debug for KNNFlatExec {
 }
 
 impl KNNFlatExec {
-    pub fn new(input: Arc<dyn ExecutionPlan>, query: Query) -> Self {
-        Self { input, query }
+    /// Create a new [KNNFlatExec] node.
+    ///
+    /// Preconditions: `input` schema must contains query.column,
+    /// and the column must be a vector.
+    pub fn try_new(input: Arc<dyn ExecutionPlan>, query: Query) -> Result<Self> {
+        let schema = input.schema();
+        schema.field_with_name(&query.column).map_err(|_| {
+            Error::IO(format!(
+                "KNNFlatExec node: query column {} not found in input schema",
+                query.column
+            ))
+        })?;
+
+        Ok(Self { input, query })
     }
 }
 

@@ -674,7 +674,10 @@ mod test {
             ArrowField::new("s", DataType::Utf8, true),
             ArrowField::new(
                 "vec",
-                DataType::List(Box::new(ArrowField::new("item", DataType::Float32, true))),
+                DataType::FixedSizeList(
+                    Box::new(ArrowField::new("item", DataType::Float32, true)),
+                    32,
+                ),
                 true,
             ),
         ]));
@@ -688,21 +691,62 @@ mod test {
                 Arc::new(StringArray::from_iter_values(
                     (0..100).map(|v| format!("s-{}", v)),
                 )),
+                Arc::new(vector),
             ],
         )
         .unwrap()]);
 
+        let test_dir = tempdir().unwrap();
+        let test_uri = test_dir.path().to_str().unwrap();
         let mut params = WriteParams::default();
         params.max_rows_per_group = 100;
         let mut reader: Box<dyn RecordBatchReader> = Box::new(batches);
-        Dataset::write(&mut reader, "memory://dataset", Some(params))
+        Dataset::write(&mut reader, test_uri, Some(params))
             .await
             .unwrap();
-        Arc::new(Dataset::open("memory://dataset").await.unwrap())
+        Arc::new(Dataset::open(test_uri).await.unwrap())
     }
 
     #[tokio::test]
     async fn test_simple_scan_plan() {
-        let dataset = create_dataset();
+        let dataset = create_dataset().await;
+        let scan = dataset.scan();
+        let plan = scan.create_plan().await.unwrap();
+
+        assert!(plan.as_any().is::<LanceScanExec>());
+        assert_eq!(
+            plan.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>(),
+            vec!["i", "s", "vec"]
+        );
+
+        let mut scan = dataset.scan();
+        scan.project(&["s"]).unwrap();
+        let plan = scan.create_plan().await.unwrap();
+        assert!(plan.as_any().is::<LanceScanExec>());
+        assert_eq!(
+            plan.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>(),
+            vec!["s"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_filter_plan() {
+        let dataset = create_dataset().await;
+        let mut scan = dataset.scan();
+        scan.filter("i > 50").unwrap();
+        let plan = scan.create_plan().await.unwrap();
+
+        assert!(plan.as_any().is::<LocalTakeExec>());
+        let filter = plan.as_any().downcast_ref::<FilterExec>().unwrap();
+        // assert!(filter.input.as_any().is::<LanceScanExec>());
+        // assert_eq!(filter.predicate, "i > 50".to_string());
     }
 }

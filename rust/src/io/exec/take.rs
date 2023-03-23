@@ -24,7 +24,7 @@ use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_plan::{
-    ExecutionPlan, RecordBatchStream, SendableRecordBatchStream, Statistics, projection,
+    projection, ExecutionPlan, RecordBatchStream, SendableRecordBatchStream, Statistics,
 };
 use futures::stream::{self, Stream, StreamExt, TryStreamExt};
 use tokio::sync::mpsc::{self, Receiver};

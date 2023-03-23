@@ -128,7 +128,11 @@ impl KNNFlatExec {
                 query.column
             ))
         })?;
-        if matches!(field.data_type(), DataType::FixedSizeList(_, _)) {
+        let is_vector = match field.data_type() {
+            DataType::FixedSizeList(item, _) => item.as_ref().data_type() == &DataType::Float32,
+            _ => false,
+        };
+        if !is_vector {
             return Err(Error::IO(format!(
                 "KNNFlatExec node: query column {} is not a vector",
                 query.column

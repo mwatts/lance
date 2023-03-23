@@ -247,50 +247,8 @@ impl Scanner {
             None
         };
 
-        let mut plan: Arc<dyn ExecutionPlan> = if let Some(q) = self.nearest.as_ref() {
-            let column_id = self.dataset.schema().field_id(q.column.as_str())?;
-            let use_index = self.nearest.as_ref().map(|q| q.use_index).unwrap_or(false);
-            let indices = if use_index {
-                self.dataset.load_indices().await?
-            } else {
-                vec![]
-            };
-            let qcol_index = indices.iter().find(|i| i.fields.contains(&column_id));
-
-            // If index is available:
-            //  Filter (optional) -> Take -> KNNIndex
-            // Else:
-            //  Filter (optional) -> KNNFlat -> Scan
-            let knn_node = if let Some(index) = qcol_index {
-                // There is an index built for the column.
-                // We will use the index.
-                if let Some(rf) = q.refine_factor {
-                    if rf == 0 {
-                        return Err(Error::IO("Refine factor can not be zero".to_string()));
-                    }
-                }
-
-                // Read from KNN index
-                let knn_node = self.ann(q, &index)?; // score, _rowid
-                let with_vector = self.dataset.schema().project(&[&q.column])?;
-                let knn_node_with_vector = self.take(knn_node, &with_vector, false);
-                if q.refine_factor.is_some() {
-                    self.flat_knn(knn_node_with_vector, q)?
-                } else {
-                    knn_node_with_vector
-                } // vector, score, _rowid
-            } else {
-                // Use flat KNN.
-                let vector_scan_projection =
-                    Arc::new(self.dataset.schema().project(&[&q.column]).unwrap());
-                let scan_node = self.scan(true, vector_scan_projection);
-                self.flat_knn(scan_node, q)?
-            };
-
-            let knn_node = filter_expr
-                .map(|f| self.filter_knn(knn_node.clone(), f))
-                .unwrap_or(Ok(knn_node))?; // vector, score, _rowid
-            self.take(knn_node, projection, true)
+        let mut plan: Arc<dyn ExecutionPlan> = if self.nearest.is_some() {
+            self.knn().await?
         } else if let Some(filter) = filter_expr {
             let columns_in_filter = column_names_in_expr(filter.as_ref());
             let filter_schema = Arc::new(
@@ -302,7 +260,7 @@ impl Scanner {
                 )?,
             );
             let scan = self.scan(true, filter_schema);
-            let filter_node = self.filter_node(filter, scan, true)?;
+            let filter_node = self.filter_node(filter, scan, Arc::new(projection.clone()), true)?;
             self.take(filter_node, projection, true)
         } else {
             self.scan(with_row_id, Arc::new(self.projections.clone()))
@@ -332,6 +290,15 @@ impl Scanner {
     /// With KNN flat:
     ///   Scan(vector_col) -> FlatKNN -> Take(filter_column)
     ///     -> *(Filter) -> *(Limit) -> Take(other_columns)
+    ///
+    /// In general, the execution plan includes the following steps:
+    ///
+    ///   1. Source stage: Scan from the source or from index if presented.
+    ///   2. Filter stage: Apply fitler if presented. If the columns in filter are not presented, a
+    ///      [`LocalTake`] will be inserted to read these columns.
+    ///   3. Limit stage: Apply limit and offset if presented.
+    ///   4. Take and Projection stage: Finally take the columns and project the schema.
+    ///
     async fn create_plan(&self) -> Result<Arc<dyn ExecutionPlan>> {
         let filter_expr = if let Some(filter) = self.filter.as_ref() {
             let planner = Planner::new(Arc::new(self.dataset.schema().into()));
@@ -341,6 +308,7 @@ impl Scanner {
             None
         };
 
+        // Source stage
         let mut plan = if self.nearest.is_some() {
             self.knn().await?
         } else if let Some(expr) = filter_expr {
@@ -412,15 +380,20 @@ impl Scanner {
             .iter()
             .map(|c| c.as_str())
             .collect::<Vec<_>>();
-        let filter_projection = self.dataset.schema().project(&columns_refs)?;
+        let filter_projection = Arc::new(self.dataset.schema().project(&columns_refs)?);
 
         let take_node = Arc::new(GlobalTakeExec::new(
             self.dataset.clone(),
-            Arc::new(filter_projection),
+            filter_projection.clone(),
             knn_node,
             false,
         ));
-        self.filter_node(filter_expression, take_node, false)
+        self.filter_node(
+            filter_expression,
+            take_node,
+            filter_projection.clone(),
+            false,
+        )
     }
 
     /// Create an Execution plan with a scan node
@@ -479,12 +452,14 @@ impl Scanner {
         &self,
         filter: Arc<dyn PhysicalExpr>,
         input: Arc<dyn ExecutionPlan>,
+        projection: Arc<Schema>,
         drop_row_id: bool,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let filter_node = Arc::new(FilterExec::try_new(filter, input)?);
         Ok(Arc::new(LocalTakeExec::new(
             filter_node,
             self.dataset.clone(),
+            projection,
             drop_row_id,
         )))
     }
@@ -520,17 +495,20 @@ impl Stream for RecordBatchStream {
 #[cfg(test)]
 mod test {
 
-    use std::path::PathBuf;
-
     use super::*;
 
+    use std::path::PathBuf;
+
     use arrow::compute::concat_batches;
-    use arrow_array::{ArrayRef, Int32Array, Int64Array, RecordBatchReader, StringArray};
+    use arrow_array::{
+        ArrayRef, FixedSizeListArray, Int32Array, Int64Array, RecordBatchReader, StringArray,
+    };
     use arrow_schema::DataType;
     use futures::TryStreamExt;
     use tempfile::tempdir;
 
-    use crate::{arrow::RecordBatchBuffer, dataset::WriteParams};
+    use crate::arrow::*;
+    use crate::dataset::WriteParams;
 
     #[tokio::test]
     async fn test_batch_size() {
@@ -690,6 +668,41 @@ mod test {
         expected_batches
     }
 
-    #[test]
-    fn test_simple_scan_plan() {}
+    async fn create_dataset() -> Arc<Dataset> {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("i", DataType::Int32, true),
+            ArrowField::new("s", DataType::Utf8, true),
+            ArrowField::new(
+                "vec",
+                DataType::List(Box::new(ArrowField::new("item", DataType::Float32, true))),
+                true,
+            ),
+        ]));
+
+        let vector_data = Float32Array::from_iter_values((0..3200).map(|v| v as f32));
+        let vector = FixedSizeListArray::try_new(&vector_data, 32).unwrap();
+        let batches = RecordBatchBuffer::new(vec![RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from_iter_values(0..100)),
+                Arc::new(StringArray::from_iter_values(
+                    (0..100).map(|v| format!("s-{}", v)),
+                )),
+            ],
+        )
+        .unwrap()]);
+
+        let mut params = WriteParams::default();
+        params.max_rows_per_group = 100;
+        let mut reader: Box<dyn RecordBatchReader> = Box::new(batches);
+        Dataset::write(&mut reader, "memory://dataset", Some(params))
+            .await
+            .unwrap();
+        Arc::new(Dataset::open("memory://dataset").await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_simple_scan_plan() {
+        let dataset = create_dataset();
+    }
 }

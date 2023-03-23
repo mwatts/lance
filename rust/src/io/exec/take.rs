@@ -24,7 +24,7 @@ use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_plan::{
-    ExecutionPlan, RecordBatchStream, SendableRecordBatchStream, Statistics,
+    ExecutionPlan, RecordBatchStream, SendableRecordBatchStream, Statistics, projection,
 };
 use futures::stream::{self, Stream, StreamExt, TryStreamExt};
 use tokio::sync::mpsc::{self, Receiver};
@@ -242,13 +242,14 @@ impl LocalTake {
         let (tx, rx) = mpsc::channel(4);
         let inner_schema = Schema::try_from(input.schema().as_ref())?;
         let take_schema = projection.exclude(&inner_schema)?;
+        let proj = projection.clone();
 
         let _bg_thread = tokio::spawn(async move {
             if let Err(e) = input
                 .zip(stream::repeat_with(|| {
-                    (dataset.clone(), take_schema.clone())
+                    (dataset.clone(), take_schema.clone(), proj.clone())
                 }))
-                .then(|(b, (dataset, take_schema))| async move {
+                .then(|(b, (dataset, take_schema, projection))| async move {
                     // TODO: need to cache the fragments.
                     let batch = b?;
                     let projection_schema = ArrowSchema::from(projection.as_ref());

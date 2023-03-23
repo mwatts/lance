@@ -103,6 +103,10 @@ impl ObjectStore {
 
         let scheme: String;
         let object_store: Arc<dyn OSObjectStore> = match parsed.scheme() {
+            "memory" => {
+                scheme = "memory".to_string();
+                Arc::new(InMemory::new())
+            }
             "s3" => {
                 scheme = "s3".to_string();
                 build_s3_object_store(uri).await?

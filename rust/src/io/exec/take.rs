@@ -1,19 +1,16 @@
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// Copyright 2023 Lance Developers.
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,7 +21,7 @@ use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_plan::{
-    projection, ExecutionPlan, RecordBatchStream, SendableRecordBatchStream, Statistics,
+    ExecutionPlan, RecordBatchStream, SendableRecordBatchStream, Statistics,
 };
 use futures::stream::{self, Stream, StreamExt, TryStreamExt};
 use tokio::sync::mpsc::{self, Receiver};
@@ -67,7 +64,6 @@ impl Take {
                 }))
                 .then(|(batch, (dataset, projection))| async move {
                     let batch = batch?;
-                    // println!("GlobalTake Batch is {:?}", batch);
                     let row_id_arr = batch.column_by_name(ROW_ID).unwrap();
                     let row_ids: &UInt64Array = as_primitive_array(row_id_arr);
                     let rows = if projection.fields.is_empty() {
@@ -78,10 +74,6 @@ impl Take {
                             .await?
                             .merge(&batch)?
                     };
-                    // println!(
-                    //    "Global batch after merge is: drop_column={drop_row_id} {:?}",
-                    //    rows
-                    //);
                     if drop_row_id {
                         rows.drop_column(ROW_ID)
                     } else {
@@ -149,19 +141,35 @@ pub struct GlobalTakeExec {
 }
 
 impl GlobalTakeExec {
-    pub fn new(
+    /// Create a new GlobalTakeExec.
+    ///
+    /// It takes the columns from the `schema` that is not presented in `input`'s schema.
+    ///
+    /// The output schema will be the union of `input`'s schema and `schema`.
+    pub fn try_new(
         dataset: Arc<Dataset>,
         schema: Arc<Schema>,
         input: Arc<dyn ExecutionPlan>,
         drop_row_id: bool,
-    ) -> Self {
-        assert!(input.schema().column_with_name(ROW_ID).is_some());
-        Self {
+    ) -> Result<Self> {
+        if !input.schema().column_with_name(ROW_ID).is_some() {
+            return Err(DataFusionError::Internal(format!(
+                "GlobalTakeExec: input schema must have a column named {}",
+                ROW_ID
+            )));
+        }
+        if schema.fields.is_empty() {
+            return Err(DataFusionError::Internal(format!(
+                "GlobalTakeExec: schema must have at least one column"
+            )));
+        }
+
+        Ok(Self {
             dataset,
             schema,
             input,
             drop_row_id,
-        }
+        })
     }
 }
 
@@ -221,7 +229,7 @@ impl ExecutionPlan for GlobalTakeExec {
     }
 
     fn statistics(&self) -> datafusion::physical_plan::Statistics {
-        todo!()
+        self.input.statistics()
     }
 }
 
@@ -406,11 +414,11 @@ impl ExecutionPlan for LocalTakeExec {
     }
 
     fn statistics(&self) -> datafusion::physical_plan::Statistics {
-        Statistics {
-            num_rows: None,
-            total_byte_size: None,
-            column_statistics: None,
-            is_exact: false,
-        }
+        self.input.statistics()
     }
+}
+
+#[cfg(test)]
+mod tests {
+
 }

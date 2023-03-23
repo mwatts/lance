@@ -259,11 +259,11 @@ impl Scanner {
                         .collect::<Vec<_>>(),
                 )?,
             );
-            let scan = self.scan(true, filter_schema);
+            let scan = self.scan(filter_schema, true);
             let filter_node = self.filter_node(filter, scan, Arc::new(projection.clone()), true)?;
             self.take(filter_node, projection, true)
         } else {
-            self.scan(with_row_id, Arc::new(self.projections.clone()))
+            self.scan(Arc::new(self.projections.clone()), with_row_id)
         };
 
         if (self.limit.unwrap_or(0) > 0) || self.offset.is_some() {
@@ -311,20 +311,39 @@ impl Scanner {
         // Source stage
         let mut plan = if self.nearest.is_some() {
             self.knn().await?
-        } else if let Some(expr) = filter_expr {
+        } else if let Some(expr) = filter_expr.as_ref() {
             let columns_in_filter = column_names_in_expr(expr.as_ref());
             let filter_projection = self.dataset.schema().project(&columns_in_filter)?;
-            self.scan(self.with_row_id, Arc::new(filter_projection))
+            self.scan(Arc::new(filter_projection), true)
         } else {
             // Full scan.
-            self.scan(self.with_row_id, Arc::new(self.projections.clone()))
+            self.scan(Arc::new(self.projections.clone()), self.with_row_id)
         };
 
         // Filter stage
+        if let Some(expr) = filter_expr.as_ref() {
+            // If there are more columns need for filter, we need to take them first.
+            let columns_in_filter = column_names_in_expr(expr.as_ref());
+            let schema = Schema::try_from(plan.schema().as_ref())?;
+            let extra_columns = columns_in_filter
+                .iter()
+                .filter(|c| !schema.field(c).is_none())
+                .collect::<Vec<_>>();
+            if !extra_columns.is_empty() {
+                let take_projection = self.dataset.schema().project(&extra_columns)?;
+                plan = self.take(plan, &take_projection, true);
+            }
+            plan = Arc::new(FilterExec::try_new(expr.clone(), plan)?);
+        };
 
         // Offset / limit stage
+        if (self.limit.unwrap_or(0) > 0) || self.offset.is_some() {
+            plan = self.limit_node(plan);
+        }
 
         // Take / Projection
+        let output_schema = self.schema()?;
+        plan = self.maybe_take(plan, output_schema, true)?;
         Ok(plan)
     }
 
@@ -363,41 +382,15 @@ impl Scanner {
             // Use flat KNN.
             let vector_scan_projection =
                 Arc::new(self.dataset.schema().project(&[&q.column]).unwrap());
-            let scan_node = self.scan(true, vector_scan_projection);
+            let scan_node = self.scan(vector_scan_projection, true);
             self.flat_knn(scan_node, q)?
         };
 
         Ok(knn_node)
     }
 
-    fn filter_knn(
-        &self,
-        knn_node: Arc<dyn ExecutionPlan>,
-        filter_expression: Arc<dyn PhysicalExpr>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        let columns_in_filter = column_names_in_expr(filter_expression.as_ref());
-        let columns_refs = columns_in_filter
-            .iter()
-            .map(|c| c.as_str())
-            .collect::<Vec<_>>();
-        let filter_projection = Arc::new(self.dataset.schema().project(&columns_refs)?);
-
-        let take_node = Arc::new(GlobalTakeExec::new(
-            self.dataset.clone(),
-            filter_projection.clone(),
-            knn_node,
-            false,
-        ));
-        self.filter_node(
-            filter_expression,
-            take_node,
-            filter_projection.clone(),
-            false,
-        )
-    }
-
     /// Create an Execution plan with a scan node
-    fn scan(&self, with_row_id: bool, projection: Arc<Schema>) -> Arc<dyn ExecutionPlan> {
+    fn scan(&self, projection: Arc<Schema>, with_row_id: bool) -> Arc<dyn ExecutionPlan> {
         Arc::new(LanceScanExec::new(
             self.dataset.clone(),
             self.dataset.fragments().clone(),
@@ -422,6 +415,28 @@ impl Scanner {
             &index.uuid.to_string(),
             q,
         ))
+    }
+
+    /// Take extra columns if necessary.
+    fn maybe_global_take(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        projection: &Schema,
+        drop_row_id: bool,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let input_arrow_schema = input.schema();
+        let input_schema = Schema::try_from(input_arrow_schema.as_ref()).unwrap();
+        let remaining_schema = projection.exclude(&input_schema)?;
+        if remaining_schema.fields.is_empty() {
+            // Nothing to take
+            return Ok(input);
+        }
+        Arc::new(GlobalTakeExec::try_new(
+            self.dataset.clone(),
+            Arc::new(remaining_schema.),
+            input,
+            drop_row_id,
+        )?)
     }
 
     /// Take row indices produced by input plan from the dataset (with projection)
@@ -744,8 +759,9 @@ mod test {
         scan.filter("i > 50").unwrap();
         let plan = scan.create_plan().await.unwrap();
 
+        println!("Plan is {:?}", plan);
         assert!(plan.as_any().is::<LocalTakeExec>());
-        let filter = plan.as_any().downcast_ref::<FilterExec>().unwrap();
+        let filter = plan.as_any().downcast_ref::<LocalTakeExec>().unwrap();
         // assert!(filter.input.as_any().is::<LanceScanExec>());
         // assert_eq!(filter.predicate, "i > 50".to_string());
     }

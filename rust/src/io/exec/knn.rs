@@ -114,16 +114,23 @@ impl std::fmt::Debug for KNNFlatExec {
 impl KNNFlatExec {
     /// Create a new [KNNFlatExec] node.
     ///
-    /// Preconditions: `input` schema must contains query.column,
-    /// and the column must be a vector.
+    /// Preconditions:
+    /// - `input` schema must contains `query.column`,
+    /// - and the column must be a vector.
     pub fn try_new(input: Arc<dyn ExecutionPlan>, query: Query) -> Result<Self> {
         let schema = input.schema();
-        schema.field_with_name(&query.column).map_err(|_| {
+        let field = schema.field_with_name(&query.column).map_err(|_| {
             Error::IO(format!(
                 "KNNFlatExec node: query column {} not found in input schema",
                 query.column
             ))
         })?;
+        if matches!(field.data_type(), DataType::FixedSizeList(_, _)) {
+            return Err(Error::IO(format!(
+                "KNNFlatExec node: query column {} is not a vector",
+                query.column
+            )));
+        }
 
         Ok(Self { input, query })
     }

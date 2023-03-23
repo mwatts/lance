@@ -150,6 +150,7 @@ impl ExecutionPlan for KNNFlatExec {
         self
     }
 
+    /// Flat KNN inherents the schema from input node, and add one score column.
     fn schema(&self) -> arrow_schema::SchemaRef {
         let input_schema = self.input.schema();
         let mut fields = input_schema.fields().to_vec();
@@ -158,7 +159,7 @@ impl ExecutionPlan for KNNFlatExec {
         Arc::new(Schema::new_with_metadata(
             fields,
             input_schema.metadata().clone(),
-        ));
+        ))
     }
 
     fn output_partitioning(&self) -> Partitioning {
@@ -262,8 +263,11 @@ impl Stream for KNNIndexStream {
 
 /// [ExecutionPlan] for KNNIndex node.
 pub struct KNNIndexExec {
+    /// Dataset to read from.
     dataset: Arc<Dataset>,
+    /// The UUID of the index.
     index_name: String,
+    /// The vector query to execute.
     query: Query,
 }
 
@@ -278,12 +282,21 @@ impl std::fmt::Debug for KNNIndexExec {
 }
 
 impl KNNIndexExec {
-    pub fn new(dataset: Arc<Dataset>, index_name: &str, query: &Query) -> Self {
-        Self {
+    /// Create a new [KNNIndexExec].
+    pub fn try_new(dataset: Arc<Dataset>, index_name: &str, query: &Query) -> Result<Self> {
+        let schema = dataset.schema();
+        if schema.field(query.column.as_str()).is_none() {
+            return Err(Error::IO(format!(
+                "KNNIndexExec node: query column {} does not exist in dataset.",
+                query.column
+            )));
+        };
+
+        Ok(Self {
             dataset,
             index_name: index_name.to_string(),
             query: query.clone(),
-        }
+        })
     }
 }
 
@@ -294,7 +307,7 @@ impl ExecutionPlan for KNNIndexExec {
 
     fn schema(&self) -> arrow_schema::SchemaRef {
         Arc::new(Schema::new(vec![
-            Field::new("score", DataType::Float32, false),
+            Field::new(SCORE_COL, DataType::Float32, false),
             Field::new(ROW_ID, DataType::UInt16, false),
         ]))
     }

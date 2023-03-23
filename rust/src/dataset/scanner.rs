@@ -262,7 +262,7 @@ impl Scanner {
                     }
                 }
 
-                let knn_node = self.ann(q, &index); // score, _rowid
+                let knn_node = self.ann(q, &index)?; // score, _rowid
                 let with_vector = self.dataset.schema().project(&[&q.column])?;
                 let knn_node_with_vector = self.take(knn_node, &with_vector, false);
                 let knn_node = if q.refine_factor.is_some() {

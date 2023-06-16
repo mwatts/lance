@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
 
 use arrow_array::{FixedSizeListArray, RecordBatch, RecordBatchReader};
 use arrow_schema::{DataType, Field, FieldRef, Schema};
@@ -21,8 +21,11 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use lance::{
     arrow::*,
     dataset::{WriteMode, WriteParams},
+    index::{
+        vector::{diskann::DiskANNParams, MetricType, VectorIndexParams},
+        DatasetIndexExt, IndexType,
+    },
     utils::testing::generate_random_array,
-    index::DatasetIndexExt,
     Dataset,
 };
 
@@ -32,31 +35,23 @@ use pprof::criterion::{Output, PProfProfiler};
 fn bench_diskann(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let  dataset = rt.block_on(async {
-        create_dataset("./diskann.lance", WriteMode::Create).await
-    })
+    let dataset = rt.block_on(async {
+        create_dataset("./diskann.lance", WriteMode::Create).await;
+        Dataset::open("./diskann.lance").await.unwrap()
+    });
 
+    let diskann_params = DiskANNParams::default();
+    let params = VectorIndexParams::with_diskann_params(MetricType::L2, diskann_params);
 
-    c.bench_function(
-        &format!("CreateDiskAnnIndex(d=128)"),
-        |b| {
-            b.to_async(&rt).iter(|| async {
-                dataset.
-                let results = dataset
-                    .scan()
-                    .nearest("vector", q, 10)
-                    .unwrap()
-                    .nprobs(10)
-                    .try_into_stream()
-                    .await
-                    .unwrap()
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .unwrap();
-                assert!(results.len() >= 1);
-            })
-        },
-    );
+    c.bench_function(format!("CreateDiskAnnIndex(d=128)").as_str(), |b| {
+        b.to_async(&rt).iter(|| async {
+            let d = dataset
+                .create_index(&["vector"], IndexType::Vector, None, &params, true)
+                .await
+                .unwrap();
+            println!("dataset: {:?}", d);
+        })
+    });
 }
 
 async fn create_dataset(path: impl AsRef<Path>, mode: WriteMode) {

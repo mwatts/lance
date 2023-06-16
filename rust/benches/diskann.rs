@@ -59,7 +59,7 @@ async fn create_dataset(path: impl AsRef<Path>, mode: WriteMode) {
         "vector",
         DataType::FixedSizeList(
             FieldRef::new(Field::new("item", DataType::Float32, true)),
-            128,
+            768,
         ),
         false,
     )]));
@@ -93,7 +93,7 @@ async fn create_dataset(path: impl AsRef<Path>, mode: WriteMode) {
     write_params.mode = mode;
 
     let mut reader: Box<dyn RecordBatchReader> = Box::new(batches);
-    let dataset = Dataset::write(&mut reader, test_uri, Some(write_params))
+    Dataset::write(&mut reader, test_uri, Some(write_params))
         .await
         .unwrap();
 }

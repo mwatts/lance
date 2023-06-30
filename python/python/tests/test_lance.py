@@ -13,6 +13,7 @@
 #  limitations under the License.
 
 import lance
+import lance.arrow
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -155,3 +156,18 @@ def _create_dataset(uri):
     arr = pa.FixedSizeListArray.from_arrays(values, 32)
     tbl = pa.Table.from_arrays([arr], schema=schema)
     return lance.write_dataset(tbl, uri)
+
+
+@pytest.fixture
+def sample_data_all_types():
+    nrows = 10
+    return pa.table({
+        'str': pa.array([str(i) for i in range(nrows)]),
+        # 'float16': pa.array([1.0 + i / 10 for i in range(nrows)], pa.float16()),
+        'bfloat16': lance.arrow.bfloat16_array([1.0 + i / 10 for i in range(nrows)]),
+    })
+
+def test_roundtrip_types(tmp_path, sample_data_all_types):
+    dataset = lance.write_dataset(sample_data_all_types, tmp_path)
+    roundtripped = dataset.to_table()
+    assert roundtripped == sample_data_all_types
